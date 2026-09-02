@@ -10,7 +10,7 @@ from backend_memory_pipeline.entity_resolution.entity_resolution import EntityRe
 from backend_memory_pipeline.policy_consent.policy_consent import PolicyConsentService,PolicyDecisionType,PolicyDecisionV1,PolicyRequestV1,ConsentControlRequestV1,ConsentControlResultV1
 from backend_memory_pipeline.memory_lifecycle.memory_lifecycle import MemoryLifecycleService,MemoryLifecycleResultV1,MemoryLifecycleRequestV1,MemoryLifecycleAction
 from backend_memory_pipeline.graph_memory.graph import GraphMemoryService,GraphWriteResultV1
-from backend_memory_pipeline.embedding.embedding import EmbeddingService,EmbeddingWriteResultV1
+from backend_memory_pipeline.embedding.embedding import EmbeddingService,EmbeddingWriteResultV1,EmbeddingError,EmbeddingErrorCode
 from backend_memory_pipeline.retrieval.retrieval import RetrievalService,RetrievalRequestV1,RetrievalResultV1,RetrievalDecision
 from backend_memory_pipeline.context_composition.context_composition import ContextCompositionService,ContextCompositionRequestV1,ContextCompositionResultV1
 from backend_memory_pipeline.response_generation.response_generation import ResponseGenerationService,ResponseGenerationRequestV1,GeneratedResponseV1
@@ -212,11 +212,8 @@ class MemoryWriteOrchestrator:
             if policy_decision.decision!=PolicyDecisionType.ALLOW:
                 continue
             try:
-                lifecycle_result=self.lifecycle.create_from_approved_candidate(
-                    candidate,
-                    policy_decision,
-                    event.timestamp
-                )
+                lifecycle_result=self.lifecycle.create_from_approved_candidate(candidate,policy_decision,
+                                 event.timestamp,metadata={"source":event.source})
             except Exception as exc:
                 raise OrchestrationError(f"Memory lifecycle failed: {exc}") from exc
             lifecycle_results.append(lifecycle_result)
@@ -252,6 +249,70 @@ class MemoryWriteOrchestrator:
             graph_results=graph_results,
             embedding_results=embedding_results
         )
+    def add_explicit_preference(
+        self,
+        subject_id:str,
+        subject_scope:str,
+        session_id:str,
+        preference:str,
+        surface:str,
+        locale:str,
+        effective_at:datetime,
+        correlation_id:Optional[str]=None,
+        idempotency_key:Optional[str]=None,
+        entity:Optional[dict[str,Any]]=None,
+        context_entities:Optional[dict[str,Any]]=None,
+        metadata:Optional[dict[str,Any]]=None
+    )->MemoryWriteResultV1:
+        if not subject_id.strip():
+            raise OrchestrationError("subject_id is required.")
+        if not subject_scope.strip():
+            raise OrchestrationError("subject_scope is required.")
+        if subject_id!=subject_scope:
+            raise OrchestrationError("subject_scope must match subject_id.")
+        if not session_id.strip():
+            raise OrchestrationError("session_id is required.")
+        if not preference.strip():
+            raise OrchestrationError("preference is required.")
+        if not surface.strip():
+            raise OrchestrationError("surface is required.")
+        if not locale.strip():
+            raise OrchestrationError("locale is required.")
+        if effective_at.tzinfo is None or effective_at.utcoffset() is None:
+            raise OrchestrationError("effective_at must be timezone-aware.")
+        try:
+            consent_record=self.policy_consent.get_consent_state(subject_id)
+        except Exception as exc:
+            raise OrchestrationError(f"Consent lookup failed: {exc}") from exc
+        correlation_id=correlation_id or IngestionService.new_correlation_id()
+        idempotency_key=idempotency_key or IngestionService.new_idempotency_key()
+        event_data={
+            "event_id":IngestionService.new_event_id(),
+            "source_event_id":IngestionService.new_source_event_id(),
+            "subject_id":subject_id,
+            "subject_scope":subject_scope,
+            "session_id":session_id,
+            "event_type":EventType.EXPLICIT_PREFERENCE,
+            "source":"mcp",
+            "surface":surface,
+            "locale":locale,
+            "timestamp":effective_at,
+            "consent_state":consent_record.state,
+            "idempotency_key":idempotency_key,
+            "correlation_id":correlation_id,
+            "text":preference.strip(),
+            "entity":entity,
+            "context_entities":dict(context_entities or {}),
+            "metadata":{
+                **dict(metadata or {}),
+                "source":"mcp",
+                "event_purpose":"explicit_preference"
+            }
+        }
+        return self.process_event(
+            event_data,
+            authorized_subject_id=subject_id
+        ) 
     @staticmethod
     def _build_policy_request(event:InteractionEventV1)->PolicyRequestV1:
         return PolicyRequestV1(
@@ -748,6 +809,87 @@ class MemoryControlOrchestrator:
         changes:Optional[dict[str,Any]]=None
     )->MemoryControlResultV1:
         if not isinstance(request,MemoryLifecycleRequestV1):
+          raise OrchestrationError(
+            "Input must be a MemoryLifecycleRequestV1."
+        )
+        try:
+            if request.action==MemoryLifecycleAction.DELETE:
+               result=self.lifecycle.delete(request)
+            elif request.action==MemoryLifecycleAction.EXPIRE:
+               result=self.lifecycle.expire(request)
+            elif request.action==MemoryLifecycleAction.RETAIN:
+               result=self.lifecycle.retain(request)
+            elif request.action==MemoryLifecycleAction.UPDATE:
+               result=self.lifecycle.update(request,changes or {})
+            elif request.action==MemoryLifecycleAction.SUPERSEDE:
+
+                if new_candidate is None or policy_decision is None:
+                   raise OrchestrationError(
+                    "Supersede requires new_candidate and policy_decision."
+                )
+                result=self.lifecycle.supersede(
+                   request,
+                   new_candidate,
+                   policy_decision
+            )
+            elif request.action==MemoryLifecycleAction.CORRECT:
+                if new_candidate is None or policy_decision is None:
+                   raise OrchestrationError("Correct requires new_candidate and policy_decision.")
+                result=self.lifecycle.correct(request,new_candidate,policy_decision)
+            else:
+                raise OrchestrationError(f"Unsupported lifecycle action: {request.action.value}")
+        except Exception as exc:
+            if isinstance(exc,OrchestrationError):
+               raise
+            raise OrchestrationError(f"Lifecycle orchestration failed: {exc}") from exc
+        if request.action==MemoryLifecycleAction.DELETE:
+            memory_id=result.memory_id or request.memory_id
+            if memory_id is None:
+                raise OrchestrationError("Memory deletion did not return a memory ID.")
+        memory=self.lifecycle.store.get(memory_id)
+        if memory is None:
+            raise OrchestrationError(
+                f"Deleted memory {memory_id} could not be loaded for propagation."
+            )
+        if self.graph is not None:
+            try:
+                self.graph.delete_memory(memory)
+            except Exception as exc:
+                raise OrchestrationError(
+                    f"Deleted memory graph synchronization failed: {exc}"
+                ) from exc
+        '''    
+        if self.embedding is not None:
+            try:
+                self.embedding.delete_memory_embedding(
+                    memory_id,request.subject_id)
+            except Exception as exc:
+                if getattr(exc,"code",None).value if getattr(exc,"code",None) is not None else False:
+                    pass
+                raise OrchestrationError(
+                    f"Deleted memory embedding synchronization failed: {exc}") from exc
+        '''
+        if self.embedding is not None:
+            try:
+              self.embedding.delete_memory_embedding(memory_id,request.subject_id)
+            except EmbeddingError as exc:
+                if exc.code!=EmbeddingErrorCode.EMBEDDING_NOT_FOUND:
+                   raise OrchestrationError(
+                    f"Deleted memory embedding synchronization failed: {exc}") from exc
+            except Exception as exc:
+                raise OrchestrationError(
+                    f"Deleted memory embedding synchronization failed: {exc}") from exc            
+        return MemoryControlResultV1(consent_state=None,lifecycle_result=result)
+    
+    '''
+    def apply_lifecycle_action(
+        self,
+        request:MemoryLifecycleRequestV1,
+        new_candidate:Optional[ExtractedMemoryCandidate]=None,
+        policy_decision:Optional[PolicyDecisionV1]=None,
+        changes:Optional[dict[str,Any]]=None
+    )->MemoryControlResultV1:
+        if not isinstance(request,MemoryLifecycleRequestV1):
             raise OrchestrationError(
                 "Input must be a MemoryLifecycleRequestV1."
             )
@@ -797,3 +939,4 @@ class MemoryControlOrchestrator:
             consent_state=None,
             lifecycle_result=result
         )
+    '''    

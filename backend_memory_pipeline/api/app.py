@@ -7,8 +7,11 @@ from backend_memory_pipeline.api.routes import (
     memory_control_router,
     memory_correction_router,
     memory_deletion_router,
-    memory_search_router
-)
+    memory_search_router,
+    memory_preference_router,
+    memory_explaination_router)
+from dotenv import load_dotenv
+load_dotenv()
 
 app=FastAPI(
     title="Spotify AI Memory API",
@@ -24,3 +27,5 @@ app.include_router(memory_control_router)
 app.include_router(memory_correction_router)
 app.include_router(memory_deletion_router)
 app.include_router(memory_search_router)
+app.include_router(memory_preference_router)
+app.include_router(memory_explaination_router)

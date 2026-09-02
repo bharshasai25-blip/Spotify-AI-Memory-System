@@ -155,7 +155,7 @@ class InMemoryMemoryStore:
 class MemoryLifecycleService:
     def __init__(self,store:Optional[MemoryStore]=None):
         self.store=store or InMemoryMemoryStore()
-    def create_from_approved_candidate(self,candidate:ExtractedMemoryCandidate,policy:PolicyDecisionV1,effective_at:Optional[datetime]=None)->MemoryLifecycleResultV1:
+    def create_from_approved_candidate(self,candidate:ExtractedMemoryCandidate,policy:PolicyDecisionV1,effective_at:Optional[datetime]=None,metadata:Optional[dict[str,Any]]=None)->MemoryLifecycleResultV1:
         self._validate_candidate_policy(candidate,policy)
         if policy.decision!=PolicyDecisionType.ALLOW:
             raise MemoryLifecycleError(
@@ -187,6 +187,7 @@ class MemoryLifecycleService:
             retrieval_eligible=policy.retrieval_eligible,
             embedding_eligible=policy.embedding_eligible,
             metadata={
+                **dict(metadata or {}),
                 "policy_version":policy.policy_version,
                 "policy_flags":policy.policy_flags,
                 "reason":candidate.reason

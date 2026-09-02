@@ -284,6 +284,47 @@ class EmbeddingService:
                 "memory_status":record.memory_status.value
             }
         )
+    '''
+    def delete_memory_embedding(self,memory_id:str,subject_id:str)->EmbeddingWriteResultV1:
+        existing=self.store.get(memory_id)
+        if existing is None:
+           return EmbeddingWriteResultV1(
+              operation=EmbeddingOperation.DELETE,
+              embedding_id=f"embedding:{memory_id}",
+              memory_id=memory_id,
+              subject_id=subject_id,
+              changed=False,
+              dimensions=0,
+              model_name="",
+              model_version="",
+              content_hash="",
+              embedding_record=None,
+              metadata={
+                "deletion_propagation":True,
+                "idempotent":True,
+                "already_absent":True})
+            
+        
+        if existing.subject_id!=subject_id or existing.subject_scope!=subject_id:
+           raise EmbeddingError(
+              EmbeddingErrorCode.SUBJECT_MISMATCH,
+              "Embedding does not belong to the requested subject.")
+        
+        changed=self.store.delete(memory_id,subject_id)
+        return EmbeddingWriteResultV1(
+            operation=EmbeddingOperation.DELETE,
+            embedding_id=existing.embedding_id,
+            memory_id=memory_id,
+            subject_id=subject_id,
+            changed=changed,
+            dimensions=existing.dimensions,
+            model_name=existing.model_name,
+            model_version=existing.model_version,
+            content_hash=existing.content_hash,
+            embedding_record=None,
+            metadata={"deletion_propagation":True})
+    '''
+    
     def delete_memory_embedding(self,memory_id:str,subject_id:str)->EmbeddingWriteResultV1:
         existing=self.store.get(memory_id)
         if existing is None:
@@ -308,10 +349,8 @@ class EmbeddingService:
             model_version=existing.model_version,
             content_hash=existing.content_hash,
             embedding_record=None,
-            metadata={
-                "deletion_propagation":True
-            }
-        )
+            metadata={"deletion_propagation":True})
+        
     def get_memory_embedding(self,memory_id:str,subject_id:str)->EmbeddingRecordV1:
         record=self.store.get(memory_id)
         if record is None:

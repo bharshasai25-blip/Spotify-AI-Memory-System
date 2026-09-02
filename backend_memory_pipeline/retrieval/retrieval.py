@@ -2,14 +2,12 @@ from datetime import datetime,timezone
 from enum import Enum
 from typing import Any,Optional,Protocol
 import math
-from httpcore import request
-from openai import embeddings
-from openai import embeddings
 from sentence_transformers import SentenceTransformer
 from pydantic import BaseModel,ConfigDict,Field,model_validator
 from backend_memory_pipeline.memory_lifecycle.memory_lifecycle import MemoryRecordV1,MemoryStatus
 from backend_memory_pipeline.graph_memory.graph import InMemoryGraphStore,GraphMemoryRecordV1,GraphRelationshipType
 from backend_memory_pipeline.embedding.embedding import EmbeddingRecordV1,InMemoryEmbeddingStore,DeterministicEmbeddingProvider,SentenceTransformerEmbeddingProvider
+from backend_memory_pipeline.persistence.qdrant.embedding_store import VectorSearchStore,VectorSearchResultV1
 class RetrievalDecision(str,Enum):
     RETRIEVED="retrieved"
     NO_RESULTS="no_results"
@@ -95,21 +93,27 @@ class DeterministicQueryEmbeddingProvider:
     def embed_query(self,text:str,model_name:str,model_version:str,dimensions:int)->list[float]:
         return self._provider.embed(text,model_name,model_version,dimensions)
 class SentenceTransformerQueryEmbeddingProvider:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.model_name = model_name
-        self.model = SentenceTransformer(model_name)
-
-    def embed_query(self,text: str,model_name: str,model_version: str,dimensions: int) -> list[float]:
-        if not isinstance(text, str) or not text.strip():
-            raise RetrievalError(RetrievalErrorCode.INVALID_QUERY,"Retrieval intent cannot be empty.")
-        if model_name != self.model_name:
-            raise RetrievalError(RetrievalErrorCode.INVALID_EMBEDDING,
-                f"Query provider is configured for model "
-                f"'{self.model_name}', but received '{model_name}'.")
-        vector = self.model.encode(text,normalize_embeddings=True).tolist()
-        if len(vector) != dimensions:
-            raise RetrievalError(RetrievalErrorCode.INVALID_EMBEDDING,"SentenceTransformer returned an unexpected query vector dimension.")
-        return vector    
+    def __init__(self,model_name:str="all-MiniLM-L6-v2"):
+        self.model_name=model_name
+        self.model=SentenceTransformer(model_name)
+    def embed_query(self,text:str,model_name:str,model_version:str,dimensions:int)->list[float]:
+        if not isinstance(text,str) or not text.strip():
+            raise RetrievalError(
+                RetrievalErrorCode.INVALID_QUERY,
+                "Retrieval intent cannot be empty."
+            )
+        if model_name!=self.model_name:
+            raise RetrievalError(
+                RetrievalErrorCode.INVALID_EMBEDDING,
+                f"Query provider is configured for model '{self.model_name}', but received '{model_name}'."
+            )
+        vector=self.model.encode(text,normalize_embeddings=True).tolist()
+        if len(vector)!=dimensions:
+            raise RetrievalError(
+                RetrievalErrorCode.INVALID_EMBEDDING,
+                "SentenceTransformer returned an unexpected query vector dimension."
+            )
+        return vector
 class RetrievalStore(Protocol):
     def graph_memories(self,subject_id:str)->list[GraphMemoryRecordV1]:
         ...
@@ -142,68 +146,97 @@ class InMemoryRetrievalStore:
             and embedding.subject_scope==subject_id
         ]
 class RetrievalService:
-    def __init__(self,retrieval_store:RetrievalStore,
+    def __init__(
+        self,
+        retrieval_store:RetrievalStore,
         query_provider:Optional[QueryEmbeddingProvider]=None,
-        retrieval_version:str="1.0"):
-
+        retrieval_version:str="1.0",
+        vector_search_store:Optional[VectorSearchStore]=None,
+        vector_model_name:str="all-MiniLM-L6-v2",
+        vector_model_version:str="v1",
+        vector_dimensions:int=384
+    ):
         self.store=retrieval_store
-        #self.query_provider = (query_provider or SentenceTransformerQueryEmbeddingProvider())
         self.query_provider=query_provider or DeterministicQueryEmbeddingProvider()
         self.retrieval_version=retrieval_version
+        self.vector_search_store=vector_search_store
+        self.vector_model_name=vector_model_name
+        self.vector_model_version=vector_model_version
+        self.vector_dimensions=vector_dimensions
     def retrieve(self,request:RetrievalRequestV1)->RetrievalResultV1:
         self._validate_request(request)
         graph_memories=self.store.graph_memories(request.subject_id)
         relationships=self.store.graph_relationships(request.subject_id)
-        embeddings=self.store.embeddings(request.subject_id)
         graph_memories=self._filter_eligible_memories(graph_memories,request)
-        embeddings=self._filter_eligible_embeddings(embeddings,request)
         print("\n===== RETRIEVAL DEBUG =====")
-        print("REQUEST SUBJECT:", request.subject_id)
-        print("REQUESTED AT:", request.requested_at)
-        print("GRAPH MEMORIES AFTER FILTER:", len(graph_memories))
-        print("EMBEDDINGS AFTER FILTER:", len(embeddings))   
-        print("RETRIEVAL DEBUG graph_memories:", graph_memories)
-        print("RETRIEVAL DEBUG embeddings:", embeddings)
-        print("RETRIEVAL DEBUG requested_at:", request.requested_at)
-        print("RETRIEVAL DEBUG subject_id:", request.subject_id)
-        if graph_memories:
-           print("GRAPH MEMORY ID:", graph_memories[0].memory_id)
-           print("GRAPH MEMORY VALID FROM:", graph_memories[0].valid_from)
-           print("GRAPH MEMORY STATUS:", graph_memories[0].status)
-           print("GRAPH MEMORY RETRIEVAL ELIGIBLE:",
-           graph_memories[0].retrieval_eligible)
-
-        if embeddings:
-           print("EMBEDDING MEMORY ID:", embeddings[0].memory_id)
-           print("EMBEDDING STATUS:", embeddings[0].memory_status)
-           print("EMBEDDING RETRIEVAL ELIGIBLE:",
-           embeddings[0].retrieval_eligible)
-           print("EMBEDDING ELIGIBLE:",
-           embeddings[0].embedding_eligible)
-
-        query_dimensions=self._resolve_query_dimensions(embeddings)
-        query_vector=self.query_provider.embed_query(request.intent,
-        self._resolve_model_name(embeddings),
-        self._resolve_model_version(embeddings),query_dimensions)
-
-        vector_scores=self._vector_scores(query_vector,embeddings)
-        print("VECTOR SCORES:", vector_scores)
-        print("RETRIEVAL DEBUG vector_scores:", vector_scores)
+        print("REQUEST SUBJECT:",request.subject_id)
+        print("REQUESTED AT:",request.requested_at)
+        print("GRAPH MEMORIES AFTER FILTER:",len(graph_memories))
+        vector_scores={}
+        vector_records={}
+        if request.vector_weight>0:
+            if self.vector_search_store is not None:
+                query_dimensions=self._resolve_vector_search_dimensions()
+                query_model_name=self._resolve_vector_search_model_name()
+                query_model_version=self._resolve_vector_search_model_version()
+                query_vector=self.query_provider.embed_query(
+                    request.intent,
+                    query_model_name,
+                    query_model_version,
+                    query_dimensions
+                )
+                vector_results=self._qdrant_vector_search(
+                    request,
+                    query_vector,
+                    request.candidate_limit
+                )
+                vector_scores={
+                    result.record.memory_id:result.score
+                    for result in vector_results
+                }
+                vector_records={
+                    result.record.memory_id:result.record
+                    for result in vector_results
+                }
+                print("VECTOR SOURCE: QDRANT")
+                print("QDRANT VECTOR CANDIDATES:",len(vector_results))
+            else:
+                embeddings=self.store.embeddings(request.subject_id)
+                embeddings=self._filter_eligible_embeddings(embeddings,request)
+                print("VECTOR SOURCE: FALLBACK EMBEDDING STORE")
+                print("EMBEDDINGS AFTER FILTER:",len(embeddings))
+                query_dimensions=self._resolve_query_dimensions(embeddings)
+                query_model_name=self._resolve_model_name(embeddings)
+                query_model_version=self._resolve_model_version(embeddings)
+                query_vector=self.query_provider.embed_query(
+                    request.intent,
+                    query_model_name,
+                    query_model_version,
+                    query_dimensions
+                )
+                vector_scores=self._vector_scores(query_vector,embeddings)
+                vector_records={
+                    embedding.memory_id:embedding
+                    for embedding in embeddings
+                }
+        else:
+            print("VECTOR RETRIEVAL SKIPPED: vector_weight=0")
+        print("VECTOR SCORES:",vector_scores)
+        print("RETRIEVAL DEBUG vector_scores:",vector_scores)
         graph_scores=self._graph_scores(request,graph_memories,relationships)
-        print("GRAPH SCORES:", graph_scores)
-        print("RETRIEVAL DEBUG graph_scores:", graph_scores)
+        print("GRAPH SCORES:",graph_scores)
+        print("RETRIEVAL DEBUG graph_scores:",graph_scores)
         memory_map={memory.memory_id:memory for memory in graph_memories}
-        embedding_map={embedding.memory_id:embedding for embedding in embeddings}
         candidate_ids=set(vector_scores)|set(graph_scores)
-        print("CANDIDATE IDS:", candidate_ids)
-        print("RETRIEVAL DEBUG candidate_ids:", candidate_ids)
+        print("CANDIDATE IDS:",candidate_ids)
+        print("RETRIEVAL DEBUG candidate_ids:",candidate_ids)
         ranked=[]
         for memory_id in candidate_ids:
-            print("RETRIEVAL DEBUG processing memory_id:", memory_id)
+            print("RETRIEVAL DEBUG processing memory_id:",memory_id)
             memory=memory_map.get(memory_id)
             if memory is None:
                 continue
-            embedding=embedding_map.get(memory_id)
+            embedding=vector_records.get(memory_id)
             vector_score=vector_scores.get(memory_id,0.0)
             graph_score=graph_scores.get(memory_id,0.0)
             explicitness=self._explicitness_score(memory)
@@ -223,19 +256,22 @@ class RetrievalService:
                 vector_weight=request.vector_weight,
                 graph_weight=request.graph_weight
             )
-            print("RETRIEVAL DEBUG scores:",
-                {"memory_id": memory_id,
-                "vector_score": vector_score,
-                "graph_score": graph_score,
-                "explicitness": explicitness,
-                "confidence": memory.confidence,
-                "recency": recency,
-                "repetition": repetition,
-                "surface": surface,
-                "negative_feedback": negative_feedback,
-                "final_score": final_score,
-                "min_score": request.min_score,})
-            
+            print(
+                "RETRIEVAL DEBUG scores:",
+                {
+                    "memory_id":memory_id,
+                    "vector_score":vector_score,
+                    "graph_score":graph_score,
+                    "explicitness":explicitness,
+                    "confidence":memory.confidence,
+                    "recency":recency,
+                    "repetition":repetition,
+                    "surface":surface,
+                    "negative_feedback":negative_feedback,
+                    "final_score":final_score,
+                    "min_score":request.min_score
+                }
+            )
             if final_score<request.min_score:
                 continue
             reason=self._relevance_reason(
@@ -272,7 +308,8 @@ class RetrievalService:
                         "valid_from":memory.valid_from,
                         "valid_to":memory.valid_to,
                         "embedding_id":embedding.embedding_id if embedding is not None else None,
-                        "retrieval_version":self.retrieval_version
+                        "retrieval_version":self.retrieval_version,
+                        "vector_source":"qdrant" if self.vector_search_store is not None else "embedding_store"
                     }
                 )
             )
@@ -285,8 +322,8 @@ class RetrievalService:
             )
         )
         ranked=self._apply_diversity_limit(ranked,request.top_k)
-        print("RANKED AFTER DIVERSITY:", len(ranked))
-        print("RANKED:", ranked)
+        print("RANKED AFTER DIVERSITY:",len(ranked))
+        print("RANKED:",ranked)
         print("===========================\n")
         if not ranked:
             return RetrievalResultV1(
@@ -301,7 +338,8 @@ class RetrievalService:
                 retrieval_version=self.retrieval_version,
                 provenance={
                     "fallback":"no_memory",
-                    "surface":request.surface
+                    "surface":request.surface,
+                    "vector_source":"qdrant" if self.vector_search_store is not None else "embedding_store"
                 }
             )
         return RetrievalResultV1(
@@ -317,8 +355,53 @@ class RetrievalService:
             provenance={
                 "surface":request.surface,
                 "top_k":request.top_k,
-                "candidate_limit":request.candidate_limit
+                "candidate_limit":request.candidate_limit,
+                "vector_source":"qdrant" if self.vector_search_store is not None else "embedding_store"
             }
+        )
+    def _qdrant_vector_search(
+        self,
+        request:RetrievalRequestV1,
+        query_vector:list[float],
+        limit:int
+    )->list[VectorSearchResultV1]:
+        try:
+            return self.vector_search_store.search(
+                query_vector=query_vector,
+                subject_id=request.subject_id,
+                subject_scope=request.subject_scope,
+                limit=limit
+            )
+        except Exception as exc:
+            if isinstance(exc,RetrievalError):
+                raise
+            raise RetrievalError(
+                RetrievalErrorCode.RETRIEVAL_CONFLICT,
+                f"Qdrant vector retrieval failed: {exc}"
+            ) from exc
+    def _resolve_vector_search_dimensions(self)->int:
+        dimensions=getattr(
+            self.vector_search_store,
+            "dimensions",
+            self.vector_dimensions
+        )
+        if not isinstance(dimensions,int) or dimensions<=0:
+            raise RetrievalError(
+                RetrievalErrorCode.INVALID_EMBEDDING,
+                "Vector search store has invalid embedding dimensions."
+            )
+        return dimensions
+    def _resolve_vector_search_model_name(self)->str:
+        return getattr(
+            self.vector_search_store,
+            "model_name",
+            self.vector_model_name
+        )
+    def _resolve_vector_search_model_version(self)->str:
+        return getattr(
+            self.vector_search_store,
+            "model_version",
+            self.vector_model_version
         )
     @staticmethod
     def _validate_request(request:RetrievalRequestV1)->None:
@@ -366,6 +449,8 @@ class RetrievalService:
                 continue
             if embedding.memory_status!=MemoryStatus.ACTIVE:
                 continue
+            if embedding.deleted:
+                continue
             eligible.append(embedding)
         return eligible[:request.candidate_limit]
     @staticmethod
@@ -404,9 +489,7 @@ class RetrievalService:
         memories:list[GraphMemoryRecordV1],
         relationships:list[Any]
     )->dict[str,float]:
-        #print("GRAPH SCORES:", graph_scores)
         relationship_by_memory:dict[str,int]={}
-        entity_match_by_memory:dict[str,int]={}
         intent_tokens=set(RetrievalService._tokens(request.intent))
         for relationship in relationships:
             if relationship.relationship_type==GraphRelationshipType.SUBJECT_HAS_MEMORY:

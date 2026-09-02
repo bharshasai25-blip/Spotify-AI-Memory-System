@@ -142,6 +142,58 @@ class ChatResponseV1(BaseModel):
     trace_id:Optional[str]=Field(default=None,max_length=128)
     metadata:dict[str,Any]=Field(default_factory=dict)
 
+class AddExplicitPreferenceRequestV1(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    schema_version:str="1.0"
+    preference:str=Field(min_length=1,max_length=10000)
+    surface:str=Field(min_length=1,max_length=64)
+    locale:str=Field(min_length=2,max_length=32)
+    effective_at:datetime
+    session_id:Optional[str]=Field(default=None,max_length=128)
+    correlation_id:Optional[str]=Field(default=None,max_length=128)
+    idempotency_key:Optional[str]=Field(default=None,max_length=256)
+    entity:Optional[dict[str,Any]]=None
+    context_entities:dict[str,Any]=Field(default_factory=dict)
+    metadata:dict[str,Any]=Field(default_factory=dict)
+    @field_validator("preference")
+    @classmethod
+    def validate_preference(cls,value:str)->str:
+        if not value.strip():
+            raise ValueError("preference cannot be empty.")
+        return value
+
+    @field_validator("surface")
+    @classmethod
+    def validate_surface(cls,value:str)->str:
+        if not value.strip():
+            raise ValueError("surface cannot be empty.")
+        return value
+
+    @field_validator("locale")
+    @classmethod
+    def validate_locale(cls,value:str)->str:
+        if not value.strip():
+            raise ValueError("locale cannot be empty.")
+        return value
+
+    @field_validator("effective_at")
+    @classmethod
+    def validate_effective_at(cls,value:datetime)->datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("effective_at must be timezone-aware.")
+        return value
+class AddExplicitPreferenceResponseV1(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    schema_version:str="1.0"
+    status:str=Field(min_length=1,max_length=32)
+    subject_id:str=Field(min_length=1,max_length=128)
+    memory_id:Optional[str]=Field(default=None,max_length=128)
+    memory_created:bool
+    source_event_id:Optional[str]=Field(default=None,max_length=128)
+    correlation_id:str=Field(min_length=1,max_length=128)
+    message:str=Field(min_length=1,max_length=1000)
+    metadata:dict[str,Any]=Field(default_factory=dict)
+
 class MemoryCorrectionRequestV1(BaseModel):
     model_config=ConfigDict(extra="forbid")
     schema_version:str="1.0"
@@ -200,7 +252,48 @@ class MemoryDeletionResponseV1(BaseModel):
     correlation_id:str=Field(min_length=1,max_length=128)
     reason:str=Field(min_length=1,max_length=5000)
     metadata:dict[str,Any]=Field(default_factory=dict)        
-    
+
+class MemoryExplanationRequestV1(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    schema_version:str="1.0"
+    current_intent:Optional[str]=Field(default=None,max_length=10000)
+    surface:str=Field(min_length=1,max_length=64)
+    locale:str=Field(min_length=2,max_length=32)
+    correlation_id:Optional[str]=Field(default=None,max_length=128)
+    @field_validator("current_intent")
+    @classmethod
+    def validate_current_intent(
+        cls,
+        value:Optional[str]
+    )->Optional[str]:
+        if value is not None and not value.strip():
+            return None
+        return value
+    @field_validator("surface")
+    @classmethod
+    def validate_surface(cls,value:str)->str:
+        if not value.strip():
+            raise ValueError("surface cannot be empty.")
+        return value
+
+    @field_validator("locale")
+    @classmethod
+    def validate_locale(cls,value:str)->str:
+        if not value.strip():
+            raise ValueError("locale cannot be empty.")
+        return value
+class MemoryExplanationResponseV1(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    schema_version:str="1.0"
+    memory_id:str=Field(min_length=1,max_length=128)
+    subject_id:str=Field(min_length=1,max_length=128)
+    explanation:str=Field(min_length=1,max_length=10000)
+    relevance_reason:Optional[str]=None
+    source:Optional[str]=Field(default=None,max_length=128)
+    confidence:Optional[float]=Field(default=None,ge=0.0,le=1.0)
+    timestamp:Optional[datetime]=None
+    correlation_id:str=Field(min_length=1,max_length=128)   
+
 class MemoryConsentControlRequestV1(BaseModel):
     model_config=ConfigDict(extra="forbid")
     schema_version:str="1.0"

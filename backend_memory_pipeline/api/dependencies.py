@@ -10,6 +10,7 @@ from typing import Annotated,Optional
 from fastapi import Depends,HTTPException,status
 from fastapi.security import HTTPAuthorizationCredentials,HTTPBearer
 from functools import lru_cache
+from backend_memory_pipeline.persistence.neo4j.graph_store import Neo4jGraphStore
 from backend_memory_pipeline.context_composition.context_composition import ContextCompositionService
 from backend_memory_pipeline.embedding.embedding import EmbeddingService,InMemoryEmbeddingStore,SentenceTransformerEmbeddingProvider
 from backend_memory_pipeline.event_validation.event_validation import EventValidator
@@ -387,6 +388,21 @@ def get_embedding_store() -> InMemoryEmbeddingStore:
     return InMemoryEmbeddingStore()
 
 @lru_cache(maxsize=1)
+def get_neo4j_graph_store()->Neo4jGraphStore:
+    uri=os.getenv("NEO4J_URI","bolt://localhost:7687")
+    username=os.getenv("NEO4J_USERNAME","neo4j")
+    password=os.getenv("NEO4J_PASSWORD","password")
+    database=os.getenv("NEO4J_DATABASE","neo4j")
+    store=Neo4jGraphStore(
+        uri=uri,
+        username=username,
+        password=password,
+        database=database,
+    )
+    store.verify_connectivity()
+    return store
+
+@lru_cache(maxsize=1)
 def get_memory_write_orchestrator()->MemoryWriteOrchestrator:
     return MemoryWriteOrchestrator(
         ingestion_service=IngestionService(),
@@ -394,7 +410,8 @@ def get_memory_write_orchestrator()->MemoryWriteOrchestrator:
         extraction_service=MemoryExtractionService(),
         policy_consent_service=PolicyConsentService(DefaultPolicyEngine()),
         lifecycle_service=MemoryLifecycleService(get_memory_store()),
-        graph_service=GraphMemoryService(get_graph_store()),
+        #graph_service=GraphMemoryService(get_graph_store()),
+        graph_service=GraphMemoryService(get_neo4j_graph_store()),
         embedding_service=EmbeddingService(store=get_embedding_store(),
             provider=SentenceTransformerEmbeddingProvider("all-MiniLM-L6-v2")),
             evidence_history_store=get_evidence_history_store())
@@ -419,7 +436,8 @@ def get_memory_query_orchestrator()->MemoryQueryOrchestrator:
         policy_consent_service=write_orchestrator.policy_consent,
         context_service=ContextCompositionService(),
         response_service=ResponseGenerationService(generator=DeterministicMemoryGroundedGenerator(),
-            model_name="deterministic",model_version="deterministic-v1"))
+            model_name="deterministic",model_version="deterministic-v1"),
+        lifecycle_service=write_orchestrator.lifecycle)
 CurrentSubject=Annotated[
     AuthenticatedSubject,
     Depends(get_current_subject)

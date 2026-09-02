@@ -3,6 +3,7 @@ from datetime import datetime,timezone
 from backend_memory_pipeline.orchestration.orchestration import (
     MemoryControlOrchestrator,
     MemoryCorrectionCommandV1,
+    MemoryExplanationRequestV1,
     MemoryQueryOrchestrator,
     MemoryWriteOrchestrator,
     OrchestrationError
@@ -828,5 +829,598 @@ def test_memory_control_orchestrator_corrects_existing_memory():
         ==existing_memory_id
     )
     assert new_memory.retrieval_eligible is True
-    assert new_memory.embedding_eligible is True    
+    assert new_memory.embedding_eligible is True  
+
+def test_write_orchestrator_adds_explicit_preference():
+    lifecycle_store=InMemoryMemoryStore()
+    graph_store=InMemoryGraphStore()
+    embedding_store=InMemoryEmbeddingStore()
+    policy_service=PolicyConsentService(
+        DefaultPolicyEngine()
+    )
+
+    consent_request=ConsentControlRequestV1(
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        action=MemoryControlAction.OPT_IN,
+        timestamp=datetime(
+            2026,
+            8,
+            28,
+            10,
+            0,
+            0,
+            tzinfo=timezone.utc
+        ),
+        correlation_id="CONSENT_EXPLICIT_001"
+    )
+
+    policy_service.apply_consent_control(
+        consent_request
+    )
+
+    orchestrator=MemoryWriteOrchestrator(
+        ingestion_service=IngestionService(),
+        event_validator=EventValidator(),
+        extraction_service=MemoryExtractionService(),
+        policy_consent_service=policy_service,
+        lifecycle_service=MemoryLifecycleService(
+            lifecycle_store
+        ),
+        graph_service=GraphMemoryService(
+            graph_store
+        ),
+        embedding_service=EmbeddingService(
+            embedding_store
+        )
+    )
+
+    effective_at=datetime(
+        2026,
+        8,
+        28,
+        10,
+        5,
+        0,
+        tzinfo=timezone.utc
+    )
+
+    result=orchestrator.add_explicit_preference(
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        session_id="SESSION_EXPLICIT_001",
+        preference="I prefer instrumental jazz.",
+        surface="chat",
+        locale="en-IN",
+        effective_at=effective_at,
+        correlation_id="EXPLICIT_001",
+        idempotency_key="IDEMP_EXPLICIT_001"
+    )
+
+    assert result.ingestion.status=="accepted"
+    assert result.validation.status==ValidationStatus.VALID
+    assert result.extraction.candidates
+    assert result.policy_decisions
+    assert result.policy_decisions[0].decision==PolicyDecisionType.ALLOW
+    assert result.lifecycle_results
+    assert result.graph_results
+    assert result.embedding_results
+
+    event=result.ingestion.event
+
+    assert event.event_type==EventType.EXPLICIT_PREFERENCE
+    assert event.subject_id=="TEST_USER_001"
+    assert event.subject_scope=="TEST_USER_001"
+    assert event.session_id=="SESSION_EXPLICIT_001"
+    assert event.text=="I prefer instrumental jazz."
+    assert event.source=="mcp"
+    assert event.correlation_id=="EXPLICIT_001"
+    assert event.idempotency_key=="IDEMP_EXPLICIT_001"
+
+    lifecycle_result=result.lifecycle_results[0]
+
+    memory_id=(
+        lifecycle_result.created_memory_id
+        or lifecycle_result.memory_id
+    )
+
+    assert memory_id is not None
+
+    memory=lifecycle_store.get(memory_id)
+
+    assert memory is not None
+    assert memory.subject_id=="TEST_USER_001"
+    assert memory.normalized_fact=="I prefer instrumental jazz."
+
+def test_add_explicit_preference_rejects_subject_scope_mismatch():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="subject_scope must match subject_id"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="TEST_USER_001",
+            subject_scope="TEST_USER_999",
+            session_id="SESSION_001",
+            preference="I prefer jazz.",
+            surface="chat",
+            locale="en-IN",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+def test_add_explicit_preference_requires_subject_id():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="subject_id is required"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="",
+            subject_scope="",
+            session_id="SESSION_001",
+            preference="I prefer jazz.",
+            surface="chat",
+            locale="en-IN",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+
+def test_add_explicit_preference_requires_session_id():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="session_id is required"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="TEST_USER_001",
+            subject_scope="TEST_USER_001",
+            session_id="",
+            preference="I prefer jazz.",
+            surface="chat",
+            locale="en-IN",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+
+def test_add_explicit_preference_requires_preference():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="preference is required"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="TEST_USER_001",
+            subject_scope="TEST_USER_001",
+            session_id="SESSION_001",
+            preference="",
+            surface="chat",
+            locale="en-IN",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+
+def test_add_explicit_preference_requires_surface():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="surface is required"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="TEST_USER_001",
+            subject_scope="TEST_USER_001",
+            session_id="SESSION_001",
+            preference="I prefer jazz.",
+            surface="",
+            locale="en-IN",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+
+def test_add_explicit_preference_requires_locale():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="locale is required"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="TEST_USER_001",
+            subject_scope="TEST_USER_001",
+            session_id="SESSION_001",
+            preference="I prefer jazz.",
+            surface="chat",
+            locale="",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+def test_add_explicit_preference_requires_timezone_aware_timestamp():
+    orchestrator=MemoryWriteOrchestrator()
+
+    with pytest.raises(
+        OrchestrationError,
+        match="effective_at must be timezone-aware"
+    ):
+        orchestrator.add_explicit_preference(
+            subject_id="TEST_USER_001",
+            subject_scope="TEST_USER_001",
+            session_id="SESSION_001",
+            preference="I prefer jazz.",
+            surface="chat",
+            locale="en-IN",
+            effective_at=datetime(
+                2026,
+                8,
+                28,
+                10,
+                0,
+                0
+            )
+        )
+
+def test_add_explicit_preference_respects_unknown_consent():
+    lifecycle_store=InMemoryMemoryStore()
+    graph_store=InMemoryGraphStore()
+    embedding_store=InMemoryEmbeddingStore()
+
+    orchestrator=MemoryWriteOrchestrator(
+        ingestion_service=IngestionService(),
+        event_validator=EventValidator(),
+        extraction_service=MemoryExtractionService(),
+        policy_consent_service=PolicyConsentService(),
+        lifecycle_service=MemoryLifecycleService(
+            lifecycle_store
+        ),
+        graph_service=GraphMemoryService(
+            graph_store
+        ),
+        embedding_service=EmbeddingService(
+            embedding_store
+        )
+    )
+
+    result=orchestrator.add_explicit_preference(
+        subject_id="TEST_USER_002",
+        subject_scope="TEST_USER_002",
+        session_id="SESSION_002",
+        preference="I prefer jazz.",
+        surface="chat",
+        locale="en-IN",
+        effective_at=datetime(
+            2026,
+            8,
+            28,
+            10,
+            0,
+            0,
+            tzinfo=timezone.utc
+        )
+    )
+
+    assert result.validation.status==ValidationStatus.VALID
+    assert result.extraction.candidates
+    assert result.policy_decisions
+    assert result.policy_decisions[0].decision!=PolicyDecisionType.ALLOW
+    assert result.lifecycle_results==[]
+    assert result.graph_results==[]
+    assert result.embedding_results==[]
+    assert lifecycle_store.all()==[]
+
+def test_query_orchestrator_explains_memory_use():
+    lifecycle_store=InMemoryMemoryStore()
+    lifecycle=MemoryLifecycleService(
+        lifecycle_store
+    )
+    policy=PolicyConsentService(
+        DefaultPolicyEngine()
+    )
+
+    consent_request=ConsentControlRequestV1(
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        action=MemoryControlAction.OPT_IN,
+        timestamp=datetime(
+            2026,
+            8,
+            28,
+            10,
+            0,
+            0,
+            tzinfo=timezone.utc
+        ),
+        correlation_id="EXPLAIN_CONSENT_001"
+    )
+
+    policy.apply_consent_control(
+        consent_request
+    )
+
+    candidate=ExtractedMemoryCandidate(
+        candidate_id="candidate_explain_001",
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        source_event_id="SOURCE_EXPLAIN_001",
+        source_event_ids=["SOURCE_EXPLAIN_001"],
+        source_session_ids=["SESSION_EXPLAIN_001"],
+        source_event_type=EventType.EXPLICIT_PREFERENCE,
+        memory_type=MemoryType.EXPLICIT_PREFERENCE,
+        decision=ExtractionDecision.MEMORY_CANDIDATE,
+        normalized_fact="I prefer instrumental jazz.",
+        evidence_texts=[
+            "I prefer instrumental jazz."
+        ],
+        entities=[],
+        confidence=0.98,
+        relevance_score=None,
+        temporal_scope=TemporalScope.PERSISTENT,
+        policy_class=PolicyClass.STANDARD,
+        policy_flags=[],
+        reason="Explicit user preference.",
+        evidence_count=1,
+        explicit_evidence_count=1,
+        behavioral_evidence_count=0
+    )
+
+    policy_request=PolicyRequestV1(
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        purpose="personalization",
+        surface="chat",
+        locale="en-IN",
+        consent_state=ConsentState.OPTED_IN
+    )
+
+    policy_decision=policy.evaluate(
+        candidate,
+        policy_request
+    )
+
+    assert policy_decision.decision==PolicyDecisionType.ALLOW
+
+    lifecycle_result=lifecycle.create_from_approved_candidate(
+        candidate,
+        policy_decision,
+        datetime(
+            2026,
+            8,
+            28,
+            10,
+            5,
+            0,
+            tzinfo=timezone.utc
+        )
+    )
+
+    memory_id=(
+        lifecycle_result.created_memory_id
+        or lifecycle_result.memory_id
+    )
+
+    assert memory_id is not None
+
+    orchestrator=MemoryQueryOrchestrator(
+        retrieval_service=RetrievalService(
+            InMemoryRetrievalStore(
+                InMemoryGraphStore(),
+                InMemoryEmbeddingStore()
+            )
+        ),
+        policy_consent_service=policy,
+        context_service=ContextCompositionService(),
+        response_service=make_response_service(),
+        lifecycle_service=lifecycle
+    )
+
+    request=MemoryExplanationRequestV1(
+        memory_id=memory_id,
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        current_intent="Why is this music recommendation relevant?",
+        surface="chat",
+        locale="en-IN",
+        correlation_id="EXPLAIN_001"
+    )
+
+    result=orchestrator.explain_memory_use(
+        request
+    )
+
+    assert result.memory_id==memory_id
+    assert result.subject_id=="TEST_USER_001"
+    assert result.explanation
+    assert "stored for personalization" in result.explanation
+    assert result.relevance_reason is not None
+    assert result.confidence==0.98
+    assert result.timestamp is not None
+
+def test_query_orchestrator_explanation_rejects_wrong_subject():
+    lifecycle_store=InMemoryMemoryStore()
+    lifecycle=MemoryLifecycleService(
+        lifecycle_store
+    )
+    policy=PolicyConsentService()
+
+    owner_consent_request=ConsentControlRequestV1(
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        action=MemoryControlAction.OPT_IN,
+        timestamp=datetime(
+            2026,
+            8,
+            28,
+            10,
+            0,
+            0,
+            tzinfo=timezone.utc
+        ),
+        correlation_id="EXPLAIN_OWNER_CONSENT_001"
+    )
+
+    policy.apply_consent_control(
+        owner_consent_request
+    )
+
+    wrong_subject_consent_request=ConsentControlRequestV1(
+        subject_id="TEST_USER_999",
+        subject_scope="TEST_USER_999",
+        action=MemoryControlAction.OPT_IN,
+        timestamp=datetime(
+            2026,
+            8,
+            28,
+            10,
+            1,
+            0,
+            tzinfo=timezone.utc
+        ),
+        correlation_id="EXPLAIN_WRONG_SUBJECT_CONSENT_001"
+    )
+
+    policy.apply_consent_control(
+        wrong_subject_consent_request
+    )
+
+    candidate=ExtractedMemoryCandidate(
+        candidate_id="candidate_owner_001",
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        source_event_id="SOURCE_OWNER_001",
+        source_event_ids=["SOURCE_OWNER_001"],
+        source_session_ids=["SESSION_OWNER_001"],
+        source_event_type=EventType.EXPLICIT_PREFERENCE,
+        memory_type=MemoryType.EXPLICIT_PREFERENCE,
+        decision=ExtractionDecision.MEMORY_CANDIDATE,
+        normalized_fact="I prefer acoustic music.",
+        evidence_texts=[
+            "I prefer acoustic music."
+        ],
+        entities=[],
+        confidence=0.95,
+        relevance_score=None,
+        temporal_scope=TemporalScope.PERSISTENT,
+        policy_class=PolicyClass.STANDARD,
+        policy_flags=[],
+        reason="Explicit preference.",
+        evidence_count=1,
+        explicit_evidence_count=1,
+        behavioral_evidence_count=0
+    )
+
+    policy_request=PolicyRequestV1(
+        subject_id="TEST_USER_001",
+        subject_scope="TEST_USER_001",
+        purpose="personalization",
+        surface="chat",
+        locale="en-IN",
+        consent_state=ConsentState.OPTED_IN
+    )
+
+    policy_decision=policy.evaluate(
+        candidate,
+        policy_request
+    )
+
+    lifecycle_result=lifecycle.create_from_approved_candidate(
+        candidate,
+        policy_decision,
+        datetime(
+            2026,
+            8,
+            28,
+            10,
+            5,
+            0,
+            tzinfo=timezone.utc
+        )
+    )
+
+    memory_id=(
+        lifecycle_result.created_memory_id
+        or lifecycle_result.memory_id
+    )
+
+    assert memory_id is not None
+
+    orchestrator=MemoryQueryOrchestrator(
+        retrieval_service=RetrievalService(
+            InMemoryRetrievalStore(
+                InMemoryGraphStore(),
+                InMemoryEmbeddingStore()
+            )
+        ),
+        policy_consent_service=policy,
+        context_service=ContextCompositionService(),
+        response_service=make_response_service(),
+        lifecycle_service=lifecycle
+    )
+
+    request=MemoryExplanationRequestV1(
+        memory_id=memory_id,
+        subject_id="TEST_USER_999",
+        subject_scope="TEST_USER_999",
+        current_intent=None,
+        surface="chat",
+        locale="en-IN",
+        correlation_id="EXPLAIN_OWNER_001"
+    )
+
+    with pytest.raises(
+        OrchestrationError,
+        match="does not belong"
+    ):
+        orchestrator.explain_memory_use(
+            request
+        )                                          
 
