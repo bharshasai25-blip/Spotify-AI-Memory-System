@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from backend_memory_pipeline.api.routes import (
     auth_router,
     health_router,
@@ -17,6 +18,17 @@ app=FastAPI(
     title="Spotify AI Memory API",
     version="1.0.0",
     description="User-facing API for the governed Spotify AI memory system."
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
 )
 
 app.include_router(auth_router)

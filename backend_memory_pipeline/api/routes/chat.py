@@ -3,6 +3,7 @@ from fastapi import APIRouter,Depends,HTTPException,status
 from backend_memory_pipeline.api.dependencies import (
     CurrentSubject,
     get_memory_query_orchestrator,
+    get_or_touch_active_session
     #require_subject
 )
 from backend_memory_pipeline.api.schemas import (
@@ -52,6 +53,7 @@ router=APIRouter(
 def chat(
     request:ChatRequestV1,
     current_subject:CurrentSubject,
+    session_id:str=Depends(get_or_touch_active_session),
     orchestrator:MemoryQueryOrchestrator=Depends(
         get_memory_query_orchestrator
     )

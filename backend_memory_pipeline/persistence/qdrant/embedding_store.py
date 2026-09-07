@@ -81,6 +81,7 @@ class QdrantEmbeddingStore:
             except Exception:
                 pass
     def get(self,memory_id:str)->Optional[EmbeddingRecordV1]:
+        self.ensure_collection()
         point_id=self._point_id(memory_id)
         try:
             points=self.client.retrieve(
@@ -95,6 +96,7 @@ class QdrantEmbeddingStore:
             return None
         return self._point_to_record(points[0])
     def upsert(self,record:EmbeddingRecordV1)->bool:
+        self.ensure_collection(record.dimensions)
         if record.dimensions!=self.dimensions:
             raise EmbeddingError(
                 EmbeddingErrorCode.DIMENSION_MISMATCH,
@@ -159,6 +161,7 @@ class QdrantEmbeddingStore:
         subject_scope:str,
         limit:int=50
     )->list[VectorSearchResultV1]:
+        self.ensure_collection()
         if not query_vector:
             raise EmbeddingError(
                 EmbeddingErrorCode.INVALID_PROVIDER,

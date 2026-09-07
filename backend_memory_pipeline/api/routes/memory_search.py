@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from backend_memory_pipeline.api.dependencies import (
     CurrentSubject,
     get_memory_query_orchestrator,
+    get_or_touch_active_session
 )
 
 from backend_memory_pipeline.api.schemas import (
@@ -54,6 +55,7 @@ router = APIRouter(
 def search_memory(
     request: MemorySearchRequestV1,
     current_subject: CurrentSubject,
+    session_id:str=Depends(get_or_touch_active_session),
     orchestrator: MemoryQueryOrchestrator = Depends(
         get_memory_query_orchestrator
     ),
@@ -97,6 +99,11 @@ def search_memory(
         ) from exc
 
     except Exception as exc:
+        import traceback
+        print("===== MEMORY SEARCH ERROR =====")
+        print(repr(exc))
+        traceback.print_exc()
+        print("===============================")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Memory retrieval failed.",

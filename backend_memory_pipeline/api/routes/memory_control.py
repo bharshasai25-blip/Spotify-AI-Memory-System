@@ -2,7 +2,8 @@ from datetime import datetime,timezone
 from fastapi import APIRouter,Depends,HTTPException,status
 from backend_memory_pipeline.api.dependencies import (
     CurrentSubject,
-    get_memory_control_orchestrator
+    get_memory_control_orchestrator,
+    get_or_touch_active_session
 )
 from backend_memory_pipeline.api.schemas import (
     APIErrorResponseV1,
@@ -45,7 +46,8 @@ router=APIRouter(
 def apply_memory_control(
     request:MemoryConsentControlRequestV1,
     current_subject:CurrentSubject,
-    orchestrator:MemoryControlOrchestrator=Depends(
+    session_id: str = Depends(get_or_touch_active_session),
+    orchestrator: MemoryControlOrchestrator = Depends(
         get_memory_control_orchestrator
     )
 )->MemoryConsentControlResponseV1:

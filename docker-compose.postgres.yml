@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: spotify-memory-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: spotify_memory
+      POSTGRES_PASSWORD: spotify_memory_password
+      POSTGRES_DB: spotify_memory
+    ports:
+      - "5432:5432"
+    volumes:
+      - spotify_memory_postgres_data:/var/lib/postgresql/data
+volumes:
+  spotify_memory_postgres_data:

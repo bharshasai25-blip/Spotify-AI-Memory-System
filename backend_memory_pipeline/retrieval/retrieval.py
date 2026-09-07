@@ -5,8 +5,8 @@ import math
 from sentence_transformers import SentenceTransformer
 from pydantic import BaseModel,ConfigDict,Field,model_validator
 from backend_memory_pipeline.memory_lifecycle.memory_lifecycle import MemoryRecordV1,MemoryStatus
-from backend_memory_pipeline.graph_memory.graph import InMemoryGraphStore,GraphMemoryRecordV1,GraphRelationshipType
-from backend_memory_pipeline.embedding.embedding import EmbeddingRecordV1,InMemoryEmbeddingStore,DeterministicEmbeddingProvider,SentenceTransformerEmbeddingProvider
+from backend_memory_pipeline.graph_memory.graph import GraphStore,InMemoryGraphStore,GraphMemoryRecordV1,GraphRelationshipType
+from backend_memory_pipeline.embedding.embedding import EmbeddingRecordV1,EmbeddingStore,InMemoryEmbeddingStore,DeterministicEmbeddingProvider,SentenceTransformerEmbeddingProvider
 from backend_memory_pipeline.persistence.qdrant.embedding_store import VectorSearchStore,VectorSearchResultV1
 class RetrievalDecision(str,Enum):
     RETRIEVED="retrieved"
@@ -145,6 +145,30 @@ class InMemoryRetrievalStore:
             if embedding.subject_id==subject_id
             and embedding.subject_scope==subject_id
         ]
+class PersistentRetrievalStore:
+    def __init__(self,graph_store:GraphStore,embedding_store:EmbeddingStore):
+        self.graph_store=graph_store
+        self.embedding_store=embedding_store
+    def graph_memories(self,subject_id:str)->list[GraphMemoryRecordV1]:
+        return [
+            memory
+            for memory in self.graph_store.all_memories()
+            if memory.subject_id==subject_id
+            and memory.subject_scope==subject_id
+        ]
+    def graph_relationships(self,subject_id:str)->list[Any]:
+        return [
+            relationship
+            for relationship in self.graph_store.all_relationships()
+            if relationship.subject_id==subject_id
+        ]
+    def embeddings(self,subject_id:str)->list[EmbeddingRecordV1]:
+        return [
+            embedding
+            for embedding in self.embedding_store.all()
+            if embedding.subject_id==subject_id
+            and embedding.subject_scope==subject_id
+        ]    
 class RetrievalService:
     def __init__(
         self,
@@ -235,7 +259,10 @@ class RetrievalService:
             print("RETRIEVAL DEBUG processing memory_id:",memory_id)
             memory=memory_map.get(memory_id)
             if memory is None:
+                print("RETRIEVAL DEBUG memory not found in Neo4j memory map:",memory_id)
                 continue
+            print("RETRIEVAL DEBUG memory:",memory)
+            print("RETRIEVAL DEBUG memory metadata:",getattr(memory,"metadata",None))
             embedding=vector_records.get(memory_id)
             vector_score=vector_scores.get(memory_id,0.0)
             graph_score=graph_scores.get(memory_id,0.0)
@@ -529,7 +556,8 @@ class RetrievalService:
         return min(1.0,evidence_count/5.0)
     @staticmethod
     def _surface_score(memory:GraphMemoryRecordV1,surface:str)->float:
-        supported_surfaces=memory.metadata.get("supported_surfaces")
+        metadata=memory.metadata if isinstance(memory.metadata,dict) else {}
+        supported_surfaces=metadata.get("supported_surfaces")
         if not supported_surfaces:
             return 0.5
         if isinstance(supported_surfaces,list) and surface in supported_surfaces:
@@ -537,7 +565,8 @@ class RetrievalService:
         return 0.0
     @staticmethod
     def _negative_feedback_score(memory:GraphMemoryRecordV1)->float:
-        value=memory.metadata.get("negative_feedback_score",0.0)
+        metadata=memory.metadata if isinstance(memory.metadata,dict) else {}
+        value=metadata.get("negative_feedback_score",0.0)
         try:
             return max(0.0,min(1.0,float(value)))
         except (TypeError,ValueError):

@@ -11,13 +11,17 @@ from fastapi import Depends,HTTPException,status
 from fastapi.security import HTTPAuthorizationCredentials,HTTPBearer
 from functools import lru_cache
 from backend_memory_pipeline.persistence.neo4j.graph_store import Neo4jGraphStore
+from backend_memory_pipeline.persistence.qdrant.embedding_store import QdrantEmbeddingStore
+from backend_memory_pipeline.persistence.postgres.user_repository import PostgreSQLUserRepository
+from backend_memory_pipeline.persistence.postgres.session_repository import PostgreSQLSessionStore
+from backend_memory_pipeline.persistence.postgres.memory_repository import PostgreSQLMemoryStore
 from backend_memory_pipeline.context_composition.context_composition import ContextCompositionService
 from backend_memory_pipeline.embedding.embedding import EmbeddingService,InMemoryEmbeddingStore,SentenceTransformerEmbeddingProvider
 from backend_memory_pipeline.event_validation.event_validation import EventValidator
 from backend_memory_pipeline.graph_memory.graph import GraphMemoryService,InMemoryGraphStore
 from backend_memory_pipeline.ingestion.ingestion import IngestionService
 from backend_memory_pipeline.memory_extraction.memory_extraction import MemoryExtractionService
-from backend_memory_pipeline.session_management.session_management import (SessionManager)
+from backend_memory_pipeline.session_management.session_management import SessionManager,SessionManagerError,SessionStartRequestV1
 from backend_memory_pipeline.memory_lifecycle.memory_lifecycle import InMemoryMemoryStore,MemoryLifecycleService
 from backend_memory_pipeline.orchestration.orchestration import (
     InMemoryEvidenceHistoryStore,
@@ -30,7 +34,7 @@ from backend_memory_pipeline.policy_consent.policy_consent import (
     PolicyConsentService
 )
 from backend_memory_pipeline.response_generation.response_generation import ResponseGenerationService,DeterministicMemoryGroundedGenerator
-from backend_memory_pipeline.retrieval.retrieval import InMemoryRetrievalStore,RetrievalService,SentenceTransformerQueryEmbeddingProvider
+from backend_memory_pipeline.retrieval.retrieval import InMemoryRetrievalStore,PersistentRetrievalStore,RetrievalService,SentenceTransformerQueryEmbeddingProvider
 @dataclass(frozen=True)
 class APIUser:
     username:str
@@ -73,6 +77,7 @@ class InMemoryUserRepository:
         self._subjects[new_subject_id]=normalized_username
         return user
 _user_repository=InMemoryUserRepository()
+_postgres_user_repository=None
 @dataclass(frozen=True)
 class AuthenticatedSubject:
     subject_id:str
@@ -107,7 +112,13 @@ def revoke_token(token_id:str)->None:
 
 def is_token_revoked(token_id:str)->bool:
     return get_revoked_token_store().is_revoked(token_id)    
-def get_user_repository()->InMemoryUserRepository:
+def get_user_repository():
+    backend=os.getenv("USER_REPOSITORY_BACKEND","inmemory").strip().lower()
+    if backend=="postgres":
+        global _postgres_user_repository
+        if _postgres_user_repository is None:
+            _postgres_user_repository=PostgreSQLUserRepository(api_user_class=APIUser)
+        return _postgres_user_repository
     return _user_repository
 bearer_scheme=HTTPBearer(auto_error=False)
 def _get_auth_secret()->str:
@@ -367,11 +378,47 @@ def get_ingestion_service()->IngestionService:
 
 @lru_cache(maxsize=1)
 def get_session_manager()->SessionManager:
+    backend=os.getenv("SESSION_STORE_BACKEND","postgres").strip().lower()
+    if backend=="postgres":
+        return SessionManager(
+            store=PostgreSQLSessionStore()
+        )
     return SessionManager()
 
+CurrentSubject=Annotated[AuthenticatedSubject,Depends(get_current_subject)]
+
+def get_or_touch_active_session(
+    current_subject:CurrentSubject,
+    session_manager:SessionManager=Depends(get_session_manager)
+)->str:
+    timestamp=datetime.now(timezone.utc)
+    active_session=session_manager.get_active_session(
+        current_subject.subject_id,
+        now=timestamp
+    )
+    if active_session is None:
+        session_result=session_manager.start_session(
+            SessionStartRequestV1(
+                subject_id=current_subject.subject_id,
+                session_start=timestamp,
+                primary_domain="music",
+                session_context="web",
+                device_type=None,
+                platform=None,
+                synthetic=False
+            )
+        )
+        return session_result.session.session_id
+    session_result=session_manager.touch_session(
+        active_session.session_id,
+        activity_at=timestamp,
+        authorized_subject_id=current_subject.subject_id
+    )
+    return session_result.session.session_id
+
 @lru_cache(maxsize=1)
-def get_memory_store() -> InMemoryMemoryStore:
-    return InMemoryMemoryStore()
+def get_memory_store()->PostgreSQLMemoryStore:
+    return PostgreSQLMemoryStore()
 
 @lru_cache(maxsize=1)
 def get_evidence_history_store()->InMemoryEvidenceHistoryStore:
@@ -389,7 +436,7 @@ def get_embedding_store() -> InMemoryEmbeddingStore:
 
 @lru_cache(maxsize=1)
 def get_neo4j_graph_store()->Neo4jGraphStore:
-    uri=os.getenv("NEO4J_URI","bolt://localhost:7687")
+    uri=os.getenv("NEO4J_URL","bolt://localhost:7687")
     username=os.getenv("NEO4J_USERNAME","neo4j")
     password=os.getenv("NEO4J_PASSWORD","password")
     database=os.getenv("NEO4J_DATABASE","neo4j")
@@ -403,6 +450,19 @@ def get_neo4j_graph_store()->Neo4jGraphStore:
     return store
 
 @lru_cache(maxsize=1)
+def get_qdrant_embedding_store()->QdrantEmbeddingStore:
+    url=os.getenv("QDRANT_URL","http://localhost:6333")
+    collection_name=os.getenv("QDRANT_COLLECTION","spotify_memory_embeddings")
+    store=QdrantEmbeddingStore(
+        url=url,
+        collection_name=collection_name,
+        dimensions=384
+    )
+    store.verify_connectivity()
+    store.ensure_collection()
+    return store
+
+@lru_cache(maxsize=1)
 def get_memory_write_orchestrator()->MemoryWriteOrchestrator:
     return MemoryWriteOrchestrator(
         ingestion_service=IngestionService(),
@@ -411,8 +471,9 @@ def get_memory_write_orchestrator()->MemoryWriteOrchestrator:
         policy_consent_service=PolicyConsentService(DefaultPolicyEngine()),
         lifecycle_service=MemoryLifecycleService(get_memory_store()),
         #graph_service=GraphMemoryService(get_graph_store()),
+        #embedding_service=EmbeddingService(store=get_embedding_store())
         graph_service=GraphMemoryService(get_neo4j_graph_store()),
-        embedding_service=EmbeddingService(store=get_embedding_store(),
+        embedding_service=EmbeddingService(store=get_qdrant_embedding_store(),
             provider=SentenceTransformerEmbeddingProvider("all-MiniLM-L6-v2")),
             evidence_history_store=get_evidence_history_store())
 @lru_cache(maxsize=1)
@@ -429,16 +490,24 @@ def get_memory_control_orchestrator()->MemoryControlOrchestrator:
 @lru_cache(maxsize=1)
 def get_memory_query_orchestrator()->MemoryQueryOrchestrator:
     write_orchestrator = get_memory_write_orchestrator()
-    retrieval_store=InMemoryRetrievalStore(get_graph_store(),get_embedding_store())
+    retrieval_store=PersistentRetrievalStore(
+        graph_store=get_neo4j_graph_store(),
+        embedding_store=get_qdrant_embedding_store())
+    retrieval_service=RetrievalService(
+        retrieval_store=retrieval_store,
+        query_provider=SentenceTransformerQueryEmbeddingProvider("all-MiniLM-L6-v2"),
+        vector_search_store=get_qdrant_embedding_store(),
+        vector_model_name="all-MiniLM-L6-v2",
+        vector_model_version="v1",
+        vector_dimensions=384)
+    
     return MemoryQueryOrchestrator(
-        retrieval_service=RetrievalService(retrieval_store,
-        query_provider=SentenceTransformerQueryEmbeddingProvider("all-MiniLM-L6-v2")),
+        retrieval_service=retrieval_service,
         policy_consent_service=write_orchestrator.policy_consent,
         context_service=ContextCompositionService(),
         response_service=ResponseGenerationService(generator=DeterministicMemoryGroundedGenerator(),
             model_name="deterministic",model_version="deterministic-v1"),
         lifecycle_service=write_orchestrator.lifecycle)
-CurrentSubject=Annotated[
-    AuthenticatedSubject,
-    Depends(get_current_subject)
-]
+
+#CurrentSubject=Annotated[AuthenticatedSubject,Depends(get_current_subject)]
+

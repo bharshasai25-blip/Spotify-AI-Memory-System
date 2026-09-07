@@ -449,4 +449,8 @@ class Neo4jGraphStore(GraphStore):
         return value
     @staticmethod
     def _neo4j_to_python(value:Any)->Any:
-        return value
+      if value is None:
+        return None
+      if hasattr(value,"to_native"):
+        return value.to_native()
+      return value

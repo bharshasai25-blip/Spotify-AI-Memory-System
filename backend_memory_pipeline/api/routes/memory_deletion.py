@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend_memory_pipeline.api.dependencies import (
     CurrentSubject,
-    get_memory_control_orchestrator
+    get_memory_control_orchestrator,
+    get_or_touch_active_session
 )
 
 from backend_memory_pipeline.api.schemas import (
@@ -64,6 +65,7 @@ def delete_memory(
     memory_id: str,
     request: MemoryDeletionRequestV1,
     current_subject: CurrentSubject,
+    session_id: str = Depends(get_or_touch_active_session),
     orchestrator: MemoryControlOrchestrator = Depends(
         get_memory_control_orchestrator
     )

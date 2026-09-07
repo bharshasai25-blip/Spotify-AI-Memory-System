@@ -562,6 +562,26 @@ class MemoryLifecycleService:
             }
         )
     def _find_equivalent(self,candidate:ExtractedMemoryCandidate)->Optional[MemoryRecordV1]:
+        finder=getattr(self.store,"find_equivalent",None)
+        if callable(finder):
+           return finder(
+            candidate.subject_id,
+            candidate.memory_type,
+            candidate.normalized_fact
+           )
+        if isinstance(self.store,InMemoryMemoryStore):
+            for memory in self.store.all():
+               if memory.subject_id!=candidate.subject_id:
+                   continue
+               if memory.status!=MemoryStatus.ACTIVE:
+                   continue
+               if memory.memory_type!=candidate.memory_type:
+                   continue
+               if memory.normalized_fact.strip().casefold()==candidate.normalized_fact.strip().casefold():
+                   return memory
+        return None
+    '''
+    def _find_equivalent(self,candidate:ExtractedMemoryCandidate)->Optional[MemoryRecordV1]:
         if not isinstance(self.store,InMemoryMemoryStore):
             return None
         for memory in self.store.all():
@@ -574,6 +594,7 @@ class MemoryLifecycleService:
             if memory.normalized_fact.strip().casefold()==candidate.normalized_fact.strip().casefold():
                 return memory
         return None
+    '''    
     def _retain_existing(self,existing:MemoryRecordV1,candidate:ExtractedMemoryCandidate,policy:PolicyDecisionV1,effective_at:datetime)->MemoryLifecycleResultV1:
         updated=existing.model_copy(
             update={

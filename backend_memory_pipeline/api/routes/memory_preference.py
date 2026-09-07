@@ -5,7 +5,7 @@ from fastapi import APIRouter,Depends,HTTPException,status
 from backend_memory_pipeline.api.dependencies import (
     CurrentSubject,
     get_memory_write_orchestrator,
-    get_session_manager
+    get_or_touch_active_session
 )
 
 from backend_memory_pipeline.api.schemas import (
@@ -19,12 +19,6 @@ from backend_memory_pipeline.ingestion.ingestion import IngestionService
 from backend_memory_pipeline.orchestration.orchestration import (
     MemoryWriteOrchestrator,
     OrchestrationError
-)
-
-from backend_memory_pipeline.session_management.session_management import (
-    SessionManager,
-    SessionManagerError,
-    SessionStartRequestV1
 )
 
 
@@ -59,52 +53,13 @@ router=APIRouter(
 def add_explicit_preference(
     request:AddExplicitPreferenceRequestV1,
     current_subject:CurrentSubject,
-    session_manager:SessionManager=Depends(
-        get_session_manager
-    ),
+    session_id: str = Depends(get_or_touch_active_session),
     orchestrator:MemoryWriteOrchestrator=Depends(
         get_memory_write_orchestrator
     )
 )->AddExplicitPreferenceResponseV1:
 
     timestamp=datetime.now(timezone.utc)
-
-    try:
-        active_session=session_manager.get_active_session(
-            current_subject.subject_id,
-            now=timestamp
-        )
-
-        if active_session is None:
-            session_result=session_manager.start_session(
-                SessionStartRequestV1(
-                    subject_id=current_subject.subject_id,
-                    session_start=timestamp,
-                    primary_domain="music",
-                    session_context="memory_explicit_preference",
-                    device_type=None,
-                    platform=None,
-                    synthetic=False
-                )
-            )
-
-            session_id=session_result.session.session_id
-
-        else:
-            session_id=active_session.session_id
-
-            session_manager.touch_session(
-                session_id,
-                activity_at=timestamp,
-                authorized_subject_id=current_subject.subject_id
-            )
-
-    except SessionManagerError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=exc.message
-        ) from exc
-
     correlation_id=(
         request.correlation_id
         or IngestionService.new_correlation_id()

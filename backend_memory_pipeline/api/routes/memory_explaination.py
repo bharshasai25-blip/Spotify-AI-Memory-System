@@ -2,7 +2,8 @@ from fastapi import APIRouter,Depends,HTTPException,status
 from fastapi.responses import JSONResponse
 from backend_memory_pipeline.api.dependencies import (
     CurrentSubject,
-    get_memory_query_orchestrator
+    get_memory_query_orchestrator,
+    get_or_touch_active_session
 )
 
 from backend_memory_pipeline.api.schemas import (
@@ -40,6 +41,7 @@ router=APIRouter(
 def explain_memory_use(
     memory_id: str,
     current_subject: CurrentSubject,
+    session_id: str = Depends(get_or_touch_active_session),
     request: MemoryExplanationRequestV1 = Depends(),
     orchestrator: MemoryQueryOrchestrator = Depends(
         get_memory_query_orchestrator
