@@ -1,4 +1,3 @@
-# Spotify-AI-Memory-System
 # Spotify Personalized AI Memory System
 
 An AI-powered memory system designed to understand, store, retrieve, and manage user preferences and contextual information to enable personalized music experiences.
