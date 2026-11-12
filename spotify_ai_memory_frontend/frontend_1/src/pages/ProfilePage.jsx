@@ -1,0 +1,8 @@
+import { useEffect, useState } from 'react'
+import { apiFetch } from '../api/client'
+function ProfilePage({ session }) {
+  const [profile, setProfile] = useState(null); const [error, setError] = useState('')
+  useEffect(() => { let cancelled = false; apiFetch('/v1/profile').then((data) => { if (!cancelled) setProfile(data) }).catch((err) => { if (!cancelled) setError(err.message) }); return () => { cancelled = true } }, [])
+  return <section className="panel p-5 sm:p-6"><p className="eyebrow">ACCOUNT</p><h2 className="mt-1 text-xl font-semibold text-white">My Profile</h2><p className="mt-2 text-sm text-muted">Your account identity for this Spotify AI Memory workspace.</p>{error ? <p className="mt-4 text-sm text-rose-300">{error}</p> : null}<div className="mt-5 flex items-center gap-4 rounded-2xl border border-white/10 bg-black/20 p-5"><span className="grid h-16 w-16 place-items-center rounded-full bg-spotify text-2xl font-bold text-[#07150b]">{(profile?.username || session.username || 'U').slice(0, 1).toUpperCase()}</span><div><h3 className="text-lg font-semibold text-white">{profile?.username || session.username}</h3><p className="mt-1 text-sm text-muted">Spotify AI Memory user</p></div></div><dl className="mt-5 grid gap-3 sm:grid-cols-2"><div className="info-card"><dt className="field-label">Username</dt><dd className="mt-2 break-words text-sm text-white">{profile?.username || session.username}</dd></div><div className="info-card"><dt className="field-label">Subject ID</dt><dd className="mt-2 break-all font-mono text-xs text-white">{profile?.subject_id || session.subject_id}</dd></div></dl></section>
+}
+export default ProfilePage
